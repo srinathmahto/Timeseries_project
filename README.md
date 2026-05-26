@@ -171,6 +171,7 @@ To do this, I:
 
    * 30 days before sowing
    * 30 days after sowing
+   * Only records falling within ±30 days of the sowing date were considered for the calculation.
 4. Calculated average NDVI for each crop type within those windows.
 
 ## Results
@@ -284,3 +285,32 @@ or
 could silently bypass my classification logic and produce incorrect analytical results without causing the pipeline to fail.
 
 That is exactly the type of issue I would prioritize monitoring in production.
+
+
+
+## Assumptions
+
+1. Sensor statuses (NULL, NA, NaN) were treated as bad readings.
+2. NDVI values outside [-1,1] were considered invalid and removed.
+3. Readings without matching parcel metadata were excluded during enrichment.
+4. Date values represented valid observations regardless of source format.
+
+## Additional production enhancements:
+
+- Store data in Delta Lake format.
+- Enable schema enforcement and schema evolution.
+- Implement partitioning by date.
+- Add unit tests and data validation tests.
+- Use orchestration tools such as Airflow or Databricks Workflows.
+
+ ## AI Assistance
+
+I used ChatGPT,Gemini and Databricks Genie as a productivity tool during the assignment to:
+
+- Validate PySpark syntax and transformations
+- Review data quality findings
+- Improve README structure and documentation
+
+All data cleaning decisions, analysis logic, and implementation choices were reviewed and finalized by me.
+
+
