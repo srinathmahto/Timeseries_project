@@ -1,5 +1,9 @@
-Satellite Intelligence Assignment
-My Approach
+
+# Satellite Intelligence Data Engineering Assignment
+
+---
+
+## 📌 My Approach
 
 When I receive an unfamiliar dataset, I try not to jump straight into cleaning.
 
@@ -7,271 +11,199 @@ In my experience, the biggest mistakes happen when we assume we understand the d
 
 For this assignment, I treated the datasets the same way I would treat a newly onboarded source in a production data platform:
 
-Understand the structure.
-Validate business assumptions.
-Identify data quality issues.
-Decide whether issues should be repaired, excluded, or monitored.
-Build a repeatable cleaning pipeline.
-Produce an analysis-ready dataset.
+* **Understand** the structure
+* **Validate** business assumptions
+* **Identify** data quality issues
+* **Decide** whether issues should be repaired, excluded, or monitored
+* **Build** a repeatable cleaning pipeline
+* **Produce** an analysis-ready dataset
 
-The assignment itself was relatively small, but the interesting part was not writing Spark code. The interesting part was deciding what should happen when the data violates expectations.
+> **The interesting part of this assignment was not writing Spark code.** > The interesting part was deciding what should happen when the data violates expectations.
 
-Understanding the Data
+---
 
-The solution uses two datasets:
+## 📂 Understanding the Data
 
-Parcel Readings
-
+### 1. Parcel Readings
 Daily observations collected from agricultural parcels.
+* `parcel_id`
+* `date`
+* `ndvi_value`
+* `temperature_c`
+* `rainfall_mm`
+* `sensor_status`
 
-These readings contain:
+### 2. Parcel Metadata
+Reference information describing each parcel.
+* `parcel_id`
+* `mill_id`
+* `crop_type`
+* `sowing_date`
+* `area_hectares`
 
-NDVI measurements
-Temperature
-Rainfall
-Sensor status
-Observation date
-Parcel Metadata
+---
 
-Reference information about each parcel:
+## 🔍 Data Quality Audit
 
-Crop type
-Mill association
-Parcel area
-Sowing date
+### Finding #1 — Mixed Date Formats
+The `date` column initially looked like a simple string field. After profiling the data, I discovered three different formats:
 
-The final analysis depends heavily on the relationship between these two datasets because sowing dates only exist in the metadata table.
+| Format | Records |
+| :--- | ---: |
+| `yyyy-MM-dd` | 2,431 |
+| `dd/MM/yyyy` | 686 |
+| `dd-MMM-yyyy` | 330 |
 
-What I Found During the Audit
-The date column looked simple until I actually checked it
+* **Decision:** ✅ Repair and standardize
+* **Reasoning:** All three formats represented valid dates. Dropping records would unnecessarily reduce usable data, so I standardized them into a single Spark `DateType` column.
 
-Initially the date column was loaded as a string.
+---
 
-At first glance this looked like a straightforward type conversion problem.
+### Finding #2 — Invalid NDVI Measurements
+The assignment specifies that NDVI should fall within the range `[-1, 1]`. The audit identified:
 
-However, after profiling the data I discovered three different formats:
+| Metric | Value |
+| :--- | :--- |
+| **Invalid Records** | 104 |
 
-Format	Records
-yyyy-MM-dd	2431
-dd/MM/yyyy	686
-dd-MMM-yyyy	330
+* **Decision:** ✅ Remove invalid records
+* **Reasoning:** Unlike date formatting issues, these values cannot be repaired confidently because the true measurement is unknown.
 
-This was my first reminder not to trust assumptions.
+---
 
-Had I simply applied a single date parser, hundreds of records would have become null.
+### Finding #3 — Sensor Status Inconsistency
+The same business meaning appeared under multiple variations:
+* **Good:** `OK`, `Ok`, `ok`
+* **Bad:** `Error`, `ERROR`, `error`
+* **Missing:** `NA`, `NULL`, `NaN`
 
-Since all three formats represented valid dates, I standardized them into a single Spark DateType column.
+#### Standardization Mapping Applied:
+| Raw Value | Standardized Value |
+| :--- | :--- |
+| `OK` / `Ok` / `ok` | `good` |
+| Error variants | `bad` |
+| `NA` / `NULL` / `NaN` | `bad` |
 
-I considered this a repair problem rather than a data loss problem.
+* **Decision:** ✅ Standardize and classify
+* **Reasoning:** Unknown sensor health should not be treated as trustworthy. If sensor quality cannot be verified, I would rather exclude it from analysis than risk introducing misleading results.
 
-The NDVI issue was different
+---
 
-The assignment explicitly states that NDVI should be between -1 and 1.
+### Finding #4 — Orphan Parcel Records
+During referential integrity validation, I found readings for parcels that did not exist in the metadata.
 
-When I checked the distribution, I found 104 records outside that range.
+* **Affected Parcels:** `PARCEL_098`, `PARCEL_099`
 
-Examples included values greater than 1.7 and less than -1.7.
+| Metric | Value |
+| :--- | :--- |
+| **Orphan Records** | 40 |
 
-Unlike date formatting issues, these records could not be repaired with confidence.
+* **Decision:** ✅ Exclude during enrichment
+* **Reasoning:** Without metadata, these records have no crop type or sowing date and therefore cannot participate in downstream analysis.
 
-If a date is represented differently, I can still determine the correct value.
+---
 
-If an NDVI measurement is physically impossible, I have no reliable way to reconstruct what the value should have been.
+### Finding #5 — Duplicate Validation
+| Dataset | Duplicate Records |
+| :--- | ---: |
+| `parcel_readings` | 0 |
+| `parcel_metadata` | 0 |
 
-For that reason I chose to remove those records rather than attempt any kind of imputation.
+* **Decision:** ✅ No action required
 
-This reduced the dataset from:
+---
 
-3447 records
+## 🧹 Cleaning Pipeline
 
-to
+The final pipeline consisted of four sequential transformations:
 
-3343 records
-Sensor status required interpretation
+1. **Step 1: Standardize dates** Convert all supported date formats into a single `DateType` column.
+2. **Step 2: Remove invalid NDVI values** Keep only measurements within the accepted `[-1, 1]` NDVI range.
+3. **Step 3: Standardize sensor status** Create a consistent sensor quality indicator (`good`/`bad`).
+4. **Step 4: Enrich with parcel metadata** Join parcel readings with metadata and remove orphan records.
 
-This turned out to be the most interesting part of the audit.
+---
 
-The assignment mentions ignoring bad sensor readings, but the dataset never explicitly uses "good" and "bad".
+## 📊 Final Dataset Summary
 
-Instead I found:
-
-OK
-Ok
-ok
-
-Error
-ERROR
-error
-
-NA
-NULL
-NaN
-
-along with actual null values.
-
-This required a business decision.
-
-I standardized:
-
-OK variants     → good
-Error variants  → bad
-
-The harder question was what to do with:
-
-NA
-NULL
-NaN
-
-I chose to classify them as bad.
-
-My reasoning was that an unknown sensor state should not be treated as trustworthy. If I cannot determine whether the sensor was functioning correctly, I do not want that reading influencing analytical results.
-
-This is the same approach I would take in production unless business stakeholders explicitly told me otherwise.
-
-Referential integrity exposed missing metadata
-
-The most important validation I performed was checking whether every parcel appearing in the readings dataset also existed in metadata.
-
-This revealed two unexpected parcel IDs:
-
-PARCEL_098
-PARCEL_099
-
-representing 40 records.
-
-Technically I could have kept these readings.
-
-The problem is that they cannot participate in the required analysis because they have no crop type and no sowing date.
-
-Without metadata they are just isolated observations.
-
-I chose to remove them during enrichment by using an inner join.
-
-After removing invalid NDVI records and orphan parcels, the final cleaned dataset contained:
-
-3303 records
-Cleaning Pipeline
-
-Once the audit was complete, the actual cleaning logic became fairly straightforward.
-
-The pipeline performs four operations:
-
-1. Standardize dates
-
-Convert all supported date formats into a single DateType column.
-
-2. Remove invalid NDVI measurements
-
-Keep only values within the accepted NDVI range.
-
-3. Standardize sensor health
-
-Create a consistent sensor quality flag.
-
-4. Enrich readings with metadata
-
-Join parcel readings with parcel metadata and remove records that cannot be enriched.
-
-The resulting dataset contains only records that can participate in downstream analysis.
-
-Analysis
-
-The business question was to compare vegetation activity before and after sowing.
-
-To do this, I first removed all readings classified as bad sensor observations.
-
-This left:
-
-2914 trusted records
-
-For each parcel I calculated:
-
-days_from_sowing = reading_date - sowing_date
-
-I then created two windows:
-
-Before sowing
--30 to -1 days
-After sowing
-0 to 30 days
-
-Average NDVI was calculated separately for each window and aggregated by crop type.
-
-Results
-Crop Type	Mean NDVI Before	Mean NDVI After	Parcels
-Soybean	0.1705	0.3114	4
-Sugarcane	0.1778	0.3354	19
-Wheat	0.1793	0.3087	2
-What stood out
-
-The pattern was surprisingly consistent.
-
-All crop types showed higher NDVI values after sowing than before sowing.
-
-Sugarcane showed the largest increase, with average NDVI nearly doubling after sowing.
-
-Given what NDVI measures, this is exactly the direction I would expect. Once crops are established after sowing, vegetation activity increases and NDVI should trend upward.
-
-The fact that all crop types exhibit the same pattern gives me confidence that the analysis is behaving as expected.
-
-If I Were Taking This to Production
-
-This notebook is appropriate for an assignment-sized dataset, but I would change several things for a real pipeline.
-
-Storage Format
-
-I would store the curated dataset as Delta rather than CSV.
-
-CSV is convenient for sharing but not ideal for large-scale analytics.
-
-Incremental Processing
-
-The current pipeline reprocesses everything.
-
-For production workloads I would process only newly arrived sensor readings and merge them into the curated layer.
-
-Automated Data Quality Checks
-
-The audit findings from this exercise would become automated controls.
-
-For example:
-
-Alert if invalid NDVI values exceed a threshold.
-Alert if new sensor status values appear.
-Alert if orphan parcel counts increase.
-Alert if date parsing begins to fail.
-What Would Most Likely Break First?
-
-The sensor status field.
-
-The data already shows signs of weak standardization:
-
-OK
-Ok
-ok
-
-Error
-ERROR
-error
-
-NA
-NULL
-NaN
-
-This tells me upstream systems are not enforcing strict values.
-
-If tomorrow the source system starts sending:
-
-Healthy
-Faulty
-
-or
-
-1
-0
-
-the pipeline will still run successfully, but the analytical results will become wrong.
-
-That kind of failure is far more dangerous than a pipeline crash because it is easy to miss.
-
-For that reason, sensor status validation is the first thing I would operationalize and monitor in a production environment.
+### Original Dataset
+| Metric | Count |
+| :--- | ---: |
+| Reading Records | 3,447 |
+| Metadata Records | 28 |
+
+### Records Removed
+| Reason | Count |
+| :--- | ---: |
+| Invalid NDVI | 104 |
+| Orphan Records | 40 |
+
+### Final Dataset Breakdowns
+| Metric | Count |
+| :--- | ---: |
+| **Clean Records** | **3,303** |
+| ↳ *Trusted Records* | 2,914 |
+| ↳ *Bad Sensor Records* | 389 |
+
+---
+
+## 🌱 NDVI Analysis
+
+> **Note:** Only trusted sensor readings were used for this analysis.
+
+### Analysis Windows
+* **Before Sowing:** `-30 <= days_from_sowing < 0`
+* **After Sowing:** `0 <= days_from_sowing <= 30`
+
+### Results
+| Crop Type | Mean NDVI Before | Mean NDVI After | Parcels |
+| :--- | :---: | :---: | :---: |
+| **Soybean** | 0.1705 | 0.3114 | 4 |
+| **Sugarcane** | 0.1778 | 0.3354 | 19 |
+| **Wheat** | 0.1793 | 0.3087 | 2 |
+
+### 📈 Key Observation
+All crop types showed higher NDVI values after sowing than before sowing. The strongest increase was observed in **Sugarcane**, where average NDVI increased from `0.1778` to `0.3354`. This aligns with expected crop growth behaviour, where vegetation activity increases following sowing and establishment.
+
+---
+
+## 🚀 Production Readiness Reflection
+
+### What Would I Change for a Larger Dataset?
+* **Storage Layer:** Move from raw CSV files to optimized columnar formats like **Delta Lake** or **Parquet**.
+* **Processing Strategy:** Replace full monolithic reloads with **incremental/delta processing**.
+* **Data Quality Controls:** Automate validation checks via framework limits for:
+  * Invalid NDVI values
+  * Unexpected sensor status values
+  * Metadata join failures
+  * Date parsing failures
+
+### What Would I Monitor?
+* **Pipeline Health:** Job success rate, processing duration, records processed per run.
+* **Data Quality:** Invalid NDVI counts, bad sensor percentages, orphan parcel counts, daily volume anomalies.
+
+### Most Likely Silent Failure
+The `sensor_status` field. The audit already revealed inconsistent representations of the same status. A future upstream modification such as shifting to `Healthy`/`Faulty` or `1`/`0` could silently impact analytical results without causing the pipeline itself to crash. 
+
+For that reason, **sensor status validation** would be one of the first automated data quality controls I would operationalize in production.
+
+---
+
+## 🛠️ Technology Stack
+* Databricks Community Edition
+* PySpark
+* Pandas
+* GitHub
+* CSV Data Sources
+
+```
+
+# 🤖 AI Usage
+
+ChatGPT was used as an engineering assistant during this assignment to:
+* **Brainstorm** data quality checks
+* **Review** PySpark logic
+* **Validate** edge cases
+* **Improve** the structure of the notebook and README
+
+> All data profiling, cleaning decisions, implementation, validation of outputs, and analysis were performed and verified manually using the provided datasets in Databricks.
