@@ -1,316 +1,277 @@
+Satellite Intelligence Assignment
+My Approach
 
+When I receive an unfamiliar dataset, I try not to jump straight into cleaning.
 
-# Data Engineer Assignment – Satellite Intelligence
+In my experience, the biggest mistakes happen when we assume we understand the data before we actually inspect it.
 
-## Approach
+For this assignment, I treated the datasets the same way I would treat a newly onboarded source in a production data platform:
 
-I approached this assignment the same way I would approach an unfamiliar production dataset: resist the urge to immediately clean the data and first understand what assumptions can and cannot be trusted.
+Understand the structure.
+Validate business assumptions.
+Identify data quality issues.
+Decide whether issues should be repaired, excluded, or monitored.
+Build a repeatable cleaning pipeline.
+Produce an analysis-ready dataset.
 
-Rather than applying generic cleaning rules, I started by profiling both datasets and validating the assumptions implied by the assignment. For example, the assignment states that NDVI values should fall between -1 and 1, but it says nothing about how dates are stored or what constitutes a "bad" sensor. Those assumptions had to be discovered from the data itself.
+The assignment itself was relatively small, but the interesting part was not writing Spark code. The interesting part was deciding what should happen when the data violates expectations.
 
-The overall workflow was:
+Understanding the Data
 
-1. Audit the datasets and identify data quality issues.
-2. Decide whether each issue should be repaired, dropped, or flagged.
-3. Build a reproducible cleaning pipeline in PySpark.
-4. Join readings with parcel metadata.
-5. Perform the NDVI analysis using only trusted sensor readings.
+The solution uses two datasets:
 
----
+Parcel Readings
 
-# Data Quality Audit
+Daily observations collected from agricultural parcels.
 
-## 1. The date column was not just a datatype problem
+These readings contain:
 
-Initially, Spark inferred the `date` column as a string. My first assumption was that the column simply needed to be cast to a date.
+NDVI measurements
+Temperature
+Rainfall
+Sensor status
+Observation date
+Parcel Metadata
 
-However, further inspection revealed that the dataset actually contained three different date formats:
+Reference information about each parcel:
 
-| Format      | Count |
-| ----------- | ----: |
-| yyyy-MM-dd  |  2431 |
-| dd/MM/yyyy  |   686 |
-| dd-MMM-yyyy |   330 |
+Crop type
+Mill association
+Parcel area
+Sowing date
 
-This is the type of issue that can quietly break downstream calculations because the data appears valid when viewed manually.
+The final analysis depends heavily on the relationship between these two datasets because sowing dates only exist in the metadata table.
 
-I chose to standardize all three formats into a single Spark DateType column rather than dropping any records because all formats represented valid dates.
+What I Found During the Audit
+The date column looked simple until I actually checked it
 
-Decision:- Repair
+Initially the date column was loaded as a string.
 
----
+At first glance this looked like a straightforward type conversion problem.
 
-## 2. NDVI values violated a hard business rule
+However, after profiling the data I discovered three different formats:
 
-The assignment explicitly states that NDVI values should be between -1 and 1.
+Format	Records
+yyyy-MM-dd	2431
+dd/MM/yyyy	686
+dd-MMM-yyyy	330
 
-When I profiled the column, I found:
+This was my first reminder not to trust assumptions.
 
-```text
-Minimum NDVI = -1.705
-Maximum NDVI = 1.925
-```
+Had I simply applied a single date parser, hundreds of records would have become null.
 
-A total of 104 records violated the expected range.
+Since all three formats represented valid dates, I standardized them into a single Spark DateType column.
 
-Some invalid values were only slightly outside the range, while others were significantly outside. Since there was no reliable way to infer the intended value, I treated these as invalid measurements rather than outliers.
+I considered this a repair problem rather than a data loss problem.
 
-Decision:- Drop 104 records
+The NDVI issue was different
 
-The rationale was simple: I can impute a missing temperature, but I cannot confidently repair an impossible NDVI value.
+The assignment explicitly states that NDVI should be between -1 and 1.
 
----
+When I checked the distribution, I found 104 records outside that range.
 
-## 3. Sensor health required interpretation
+Examples included values greater than 1.7 and less than -1.7.
 
-The assignment later asks to ignore rows where the sensor status is bad.
+Unlike date formatting issues, these records could not be repaired with confidence.
 
-The challenge was that the dataset never actually used the words "good" or "bad".
+If a date is represented differently, I can still determine the correct value.
 
-Instead, I found:
+If an NDVI measurement is physically impossible, I have no reliable way to reconstruct what the value should have been.
 
-| Status      | Count |
-| ----------- | ----: |
-| Ok          |  2890 |
-| OK          |    53 |
-| ok          |    64 |
-| Error       |    90 |
-| ERROR       |    80 |
-| error       |    76 |
-| NA          |    53 |
-| NULL        |    43 |
-| NaN         |    41 |
-| Actual Null |    43 |
+For that reason I chose to remove those records rather than attempt any kind of imputation.
 
-This required a business decision rather than a technical one.
+This reduced the dataset from:
 
-I standardized:
+3447 records
 
-```text
-OK / Ok / ok     → good
-Error variations → bad
-```
+to
 
-For `NA`, `NULL`, `NaN`, and actual null values, I treated them as bad readings.
+3343 records
+Sensor status required interpretation
 
-My reasoning was that unknown sensor health is operationally closer to a failed sensor than a healthy one. If the status cannot be trusted, the reading should not influence analysis.
+This turned out to be the most interesting part of the audit.
 
-Decision:- Standardize and classify unknown states as bad
+The assignment mentions ignoring bad sensor readings, but the dataset never explicitly uses "good" and "bad".
 
----
+Instead I found:
 
-## 4. Referential integrity issues
-
-When validating the join between readings and metadata, I found two parcel IDs in the readings dataset that had no corresponding metadata record:
-
-```text
-PARCEL_098
-PARCEL_099
-```
-
-Together they accounted for 40 readings.
-
-These records could not be enriched with crop type, sowing date, mill information, or parcel area.
-
-Since the final analysis depends on sowing dates and crop types, these records were unusable for downstream analysis.
-
-Decision:- Exclude during enrichment
-
-This was handled naturally through an inner join.
-
----
-
-## 5. What I did not find
-
-Sometimes the absence of issues is just as important as the presence of them.
-
-I verified that:
-
-* No duplicate records existed in either dataset.
-* No missing values existed in metadata.
-* No missing NDVI values existed.
-* No missing temperature or rainfall values existed.
-
-This allowed me to avoid unnecessary cleaning logic.
-
----
-
-# Cleaning Pipeline
-
-The pipeline was implemented in PySpark within Databricks Community Edition.
-
-The cleaning flow was intentionally simple:
-
-```text
-Read CSVs
-      ↓
-Standardize dates
-      ↓
-Remove invalid NDVI values
-      ↓
-Standardize sensor status
-      ↓
-Join with parcel metadata
-      ↓
-Generate cleaned_parcel_timeseries.csv
-```
-
-I avoided introducing unnecessary complexity because the dataset is small and the assignment specifically emphasizes practical decision-making over over-engineering.
-
----
-
-# Analysis
-
-The assignment required comparing vegetation health before and after sowing.
-
-To do this, I:
-
-1. Excluded all records classified as bad sensor readings.
-2. Calculated the difference between reading date and sowing date.
-3. Created two windows:
-
-   * 30 days before sowing
-   * 30 days after sowing
-   * Only records falling within ±30 days of the sowing date were considered for the calculation.
-4. Calculated average NDVI for each crop type within those windows.
-
-## Results
-
-| crop_type | mean_ndvi_before | mean_ndvi_after | n_parcels |
-| --------- | ---------------: | --------------: | --------: |
-| sugarcane |           0.1778 |          0.3354 |        19 |
-| wheat     |           0.1793 |          0.3087 |         2 |
-
-### Interpretation
-
-Both crop types showed a noticeable increase in NDVI after sowing.
-
-For sugarcane, average NDVI nearly doubled from 0.1778 to 0.3354. Wheat showed a similar pattern despite the smaller sample size.
-
-This aligns with what I would expect operationally: once sowing occurs and crops begin establishing, vegetation activity increases and NDVI values trend upward.
-
----
-
-# Production Readiness Reflection
-
-## If this pipeline ran daily and the dataset became 100× larger, what would I change?
-
-1. Move away from CSV-based processing
-
-CSV is fine for an assignment, but not for sustained analytical workloads.
-
-I would store the cleaned dataset in Parquet or Delta format to reduce storage costs, improve scan performance, and support schema evolution.
-
------
-
-2. Process incrementally instead of reprocessing history
-
-The current pipeline reprocesses every reading each run.
-
-In production, I would process only newly arrived readings and merge them into the curated dataset. This reduces compute costs and shortens execution time.
-
------
-
-3. Add automated data quality gates
-
-Most of the issues discovered in this assignment could have been detected automatically.
-
-I would implement validation checks for:
-
-* Invalid NDVI values
-* Unexpected sensor statuses
-* Join failures against metadata
-* Date parsing failures
-
-The pipeline should fail fast when data quality deteriorates rather than silently producing questionable results.
-
----
-
-## What would I monitor?
-
-I would monitor both pipeline health and data quality.
-
-1.Pipeline Metrics
-
-* Daily run success/failure
-* Processing time
-* Records processed
-
-2.Data Quality Metrics
-
-* Count of invalid NDVI values
-* Percentage of bad sensor readings
-* Number of orphan parcel IDs
-* Daily row count anomalies
-* Date parsing failures
-
-These metrics would provide early warning that an upstream system has changed behavior.
-
----
-
-## What is most likely to silently break?
-
-The sensor status field.
-
-During this exercise I discovered that sensor status already existed in multiple representations:
-
-```text
 OK
 Ok
 ok
+
 Error
 ERROR
 error
+
 NA
 NULL
 NaN
-```
 
-This tells me the upstream system does not strongly enforce standard values.
+along with actual null values.
 
-A future change such as:
+This required a business decision.
 
-```text
+I standardized:
+
+OK variants     → good
+Error variants  → bad
+
+The harder question was what to do with:
+
+NA
+NULL
+NaN
+
+I chose to classify them as bad.
+
+My reasoning was that an unknown sensor state should not be treated as trustworthy. If I cannot determine whether the sensor was functioning correctly, I do not want that reading influencing analytical results.
+
+This is the same approach I would take in production unless business stakeholders explicitly told me otherwise.
+
+Referential integrity exposed missing metadata
+
+The most important validation I performed was checking whether every parcel appearing in the readings dataset also existed in metadata.
+
+This revealed two unexpected parcel IDs:
+
+PARCEL_098
+PARCEL_099
+
+representing 40 records.
+
+Technically I could have kept these readings.
+
+The problem is that they cannot participate in the required analysis because they have no crop type and no sowing date.
+
+Without metadata they are just isolated observations.
+
+I chose to remove them during enrichment by using an inner join.
+
+After removing invalid NDVI records and orphan parcels, the final cleaned dataset contained:
+
+3303 records
+Cleaning Pipeline
+
+Once the audit was complete, the actual cleaning logic became fairly straightforward.
+
+The pipeline performs four operations:
+
+1. Standardize dates
+
+Convert all supported date formats into a single DateType column.
+
+2. Remove invalid NDVI measurements
+
+Keep only values within the accepted NDVI range.
+
+3. Standardize sensor health
+
+Create a consistent sensor quality flag.
+
+4. Enrich readings with metadata
+
+Join parcel readings with parcel metadata and remove records that cannot be enriched.
+
+The resulting dataset contains only records that can participate in downstream analysis.
+
+Analysis
+
+The business question was to compare vegetation activity before and after sowing.
+
+To do this, I first removed all readings classified as bad sensor observations.
+
+This left:
+
+2914 trusted records
+
+For each parcel I calculated:
+
+days_from_sowing = reading_date - sowing_date
+
+I then created two windows:
+
+Before sowing
+-30 to -1 days
+After sowing
+0 to 30 days
+
+Average NDVI was calculated separately for each window and aggregated by crop type.
+
+Results
+Crop Type	Mean NDVI Before	Mean NDVI After	Parcels
+Soybean	0.1705	0.3114	4
+Sugarcane	0.1778	0.3354	19
+Wheat	0.1793	0.3087	2
+What stood out
+
+The pattern was surprisingly consistent.
+
+All crop types showed higher NDVI values after sowing than before sowing.
+
+Sugarcane showed the largest increase, with average NDVI nearly doubling after sowing.
+
+Given what NDVI measures, this is exactly the direction I would expect. Once crops are established after sowing, vegetation activity increases and NDVI should trend upward.
+
+The fact that all crop types exhibit the same pattern gives me confidence that the analysis is behaving as expected.
+
+If I Were Taking This to Production
+
+This notebook is appropriate for an assignment-sized dataset, but I would change several things for a real pipeline.
+
+Storage Format
+
+I would store the curated dataset as Delta rather than CSV.
+
+CSV is convenient for sharing but not ideal for large-scale analytics.
+
+Incremental Processing
+
+The current pipeline reprocesses everything.
+
+For production workloads I would process only newly arrived sensor readings and merge them into the curated layer.
+
+Automated Data Quality Checks
+
+The audit findings from this exercise would become automated controls.
+
+For example:
+
+Alert if invalid NDVI values exceed a threshold.
+Alert if new sensor status values appear.
+Alert if orphan parcel counts increase.
+Alert if date parsing begins to fail.
+What Would Most Likely Break First?
+
+The sensor status field.
+
+The data already shows signs of weak standardization:
+
+OK
+Ok
+ok
+
+Error
+ERROR
+error
+
+NA
+NULL
+NaN
+
+This tells me upstream systems are not enforcing strict values.
+
+If tomorrow the source system starts sending:
+
 Healthy
 Faulty
-```
 
 or
 
-```text
 1
 0
-```
 
-could silently bypass my classification logic and produce incorrect analytical results without causing the pipeline to fail.
+the pipeline will still run successfully, but the analytical results will become wrong.
 
-That is exactly the type of issue I would prioritize monitoring in production.
+That kind of failure is far more dangerous than a pipeline crash because it is easy to miss.
 
-
-
-## Assumptions
-
-1. Sensor statuses (NULL, NA, NaN) were treated as bad readings.
-2. NDVI values outside [-1,1] were considered invalid and removed.
-3. Readings without matching parcel metadata were excluded during enrichment.
-4. Date values represented valid observations regardless of source format.
-
-## Additional production enhancements:
-
-- Store data in Delta Lake format.
-- Enable schema enforcement and schema evolution.
-- Implement partitioning by date.
-- Add unit tests and data validation tests.
-- Use orchestration tools such as Airflow or Databricks Workflows.
-
- ## AI Assistance
-
-I used ChatGPT,Gemini and Databricks Genie as a productivity tool during the assignment to:
-
-- Validate PySpark syntax and transformations
-- Review data quality findings
-- Improve README structure and documentation
-
-All data cleaning decisions, analysis logic, and implementation choices were reviewed and finalized by me.
-
-
+For that reason, sensor status validation is the first thing I would operationalize and monitor in a production environment.
