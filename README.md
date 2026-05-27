@@ -200,7 +200,7 @@ For that reason, **sensor status validation** would be one of the first automate
 
 # 🤖 AI Usage
 
-ChatGPT was used as an engineering assistant during this assignment to:
+ChatGPT and Genie was used as an engineering assistant during this assignment to:
 * **Brainstorm** data quality checks
 * **Review** PySpark logic
 * **Validate** edge cases
